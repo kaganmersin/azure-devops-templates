@@ -1,0 +1,33 @@
+trigger:
+  branches:
+    include:
+      - '*' 
+
+pr: none 
+
+resources:
+  repositories:
+  - repository: <dependentrepository1>
+    type: <type1>
+    endpoint: <endpoint1>
+    name: <name1>
+
+  - repository: <repository2>
+    type: <type2>
+    endpoint: <endpoint2>
+    name: <name2>
+
+  - repository: <repository3>
+    type: <type3>
+    endpoint: <endpoint3>
+    name: <name3>
+    
+  - repository: <repository4>
+    type: <type4>
+    endpoint: <endpoint>4
+    name: <name4>
+    
+  
+
+stages:
+- template: devops\azure-build-template.yml@devops

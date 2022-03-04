@@ -1,0 +1,9 @@
+FROM openjdk-11:latest
+RUN echo "WAR NAME is: WAR_NAME"
+VOLUME /tmp
+RUN mkdir /app
+COPY ./target/WAR_NAME*.war /app/WAR_NAME.war
+EXPOSE 8080
+USER jboss
+ENTRYPOINT ["java"]
+CMD ["-jar", "/app/WAR_NAME.war", "--spring.config.location=/config/application.properties"]

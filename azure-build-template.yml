@@ -1,0 +1,335 @@
+parameters:
+- name: 'agent'
+  type: string
+  displayName: Pool Image
+- name: 'containerRegistry'
+  type: string
+  displayName: ACR Registry 
+- name: 'containerRegistryServiceConnection'
+  type: string
+  displayName: ACR Registry service connection
+- name: 'aksServiceName'
+  type: string
+  displayName: AKS cluster name
+- name: 'clusterDns'
+  type: string
+  displayName: AKS cluster dns
+- name: 'keyvaultName'
+  type: string
+  displayName: Keyvault name 
+- name: 'userAssignedIdentityID'
+  type: string
+  displayName: AKS cluster azureKeyvaultSecretsProvider clientId
+- name: 'tenantId'
+  type: string
+  displayName: Tenant ID
+- name: 'aksregion'
+  type: string
+  displayName: AKS region
+
+stages:
+- stage: BuildandPush
+  displayName: Build image and push to the Azure ACR
+  jobs:
+  - job: Maven_Build_Push
+    pool:
+      name: ${{ parameters.agent }}    
+    steps:
+    - checkout: self
+    - checkout: repository3
+    - checkout: repository2
+    - checkout: repository4
+
+    - task: Bash@3
+      name:  setprojectName
+      inputs:
+        targetType: 'inline' 
+        script: |
+          echo "##vso[task.setvariable variable=projectNameGlobal;isOutput=true]$(echo $(Build.Repository.Name)| sed 's|.*/||')"
+          echo "##vso[task.setvariable variable=projectName]$(echo $(Build.Repository.Name)| sed 's|.*/||')"
+
+
+              
+    - task: Bash@3
+      name:  setprojectVersion
+      inputs:
+        targetType: 'inline'
+        displayName: Assign project version to the variable
+        workingDirectory: $(Build.SourcesDirectory)/$(projectName)
+        script: |
+          if [[ "$(projectName)" == "<php3>" ]]; then
+             UNDEFINED_PROJECT_VERSION=$(cat versionnumber)-$(git log -n 1 --pretty=format:'%h')
+
+          elif [[ "$(projectName)" == "securityproxy" ]]; then
+             UNDEFINED_PROJECT_VERSION=$(git log -n 1 --pretty=format:'%h')
+          else 
+             UNDEFINED_PROJECT_VERSION=$(mvn -Dexec.executable='echo' -Dexec.args='${project.version}' --non-recursive exec:exec -q)-$(git log -n 1 --pretty=format:'%h')
+          fi
+          echo "##vso[task.setvariable variable=projectVersionGlobal;isOutput=true]$UNDEFINED_PROJECT_VERSION"
+          echo "##vso[task.setvariable variable=projectVersion]$UNDEFINED_PROJECT_VERSION"
+
+    - task: Bash@3
+      name:  versionArrangement
+      displayName: Version Arrangement 
+      condition: and(succeeded(),  ne(variables.projectName, 'securityproxy'))
+      inputs:
+        targetType: 'inline' 
+        workingDirectory: $(Build.SourcesDirectory)/$(projectName)
+        script: | 
+
+             if [[ "$(projectName)" == "<php3>" ]]; then 
+                FILE_NAME=version
+                VERSION_NUMBER=$(cat versionnumber)
+             else
+                FILE_NAME=version.json
+                cp -rfp $(Build.SourcesDirectory)/devops/devops/version.json $(Build.SourcesDirectory)/$(projectName)/version.json
+                VERSION_NUMBER=$(mvn -Dexec.executable='echo' -Dexec.args='${project.version}' --non-recursive exec:exec -q)
+             fi
+
+             NEW_COMMITIDSHORT=$(git log -n 1 --pretty=format:'%h')
+             NEW_COMMITIDLONG=$(git rev-parse HEAD)         
+             NEW_COMMIT_DATE=$(git log -1 --format=%cd)
+
+             sed -i "s|LONGCOMMITID|$NEW_COMMITIDLONG|g" $FILE_NAME 
+             sed -i "s|SHORTCOMMITID|$NEW_COMMITIDSHORT|g" $FILE_NAME 
+             sed -i "s|VERSION|$VERSION_NUMBER|g" $FILE_NAME 
+             sed -i "s|BUILDTIME|$NEW_COMMIT_DATE|g" $FILE_NAME 
+
+             cat $FILE_NAME          
+
+
+
+    - task: Bash@3
+      name:  printVariables
+      inputs:
+        targetType: 'inline'
+        displayName: Assign project version to the variable
+        workingDirectory: $(Build.SourcesDirectory)/$(projectName)
+        script: |     
+             echo projectNameGlobal is that $(setprojectName.projectNameGlobal)
+             echo projectName is that $(projectName)  
+             echo projectVersionGlobal is that $(setprojectVersion.projectVersionGlobal)
+             echo projectVersion is that $(projectVersion)
+
+
+    - task: SonarQubePrepare@4
+      displayName:  SonarQube Prepare
+      inputs:
+        SonarQube: 'SonarQube'
+        scannerMode: 'Other'
+        workingDirectory: $(Build.SourcesDirectory)/$(projectName)
+        extraProperties: |
+          sonar.projectName=$(projectName)
+          sonar.projectKey=$(System.TeamProjectId)_$(projectName)
+          sonar.projectVersion=$(projectVersion)
+          sonar.sources=.
+          sonar.tests=.
+          sonar.test.inclusions=**/*Test*/**
+          sonar.exclusions=**/*Test*/**
+
+          
+    - task: Bash@3
+      name:  Buildrepository2
+      displayName: Build repository2
+      inputs:
+        targetType: 'inline' 
+        workingDirectory: $(Build.SourcesDirectory)/repository2
+        script: |        
+          chmod u+rwx --recursive mvn*
+          chmod go-rwx --recursive mvn*
+          ./mvnw install -Dmaven.test.skip=true
+
+
+
+    - task: Bash@3
+      name:  BuildCode
+      displayName:  Build Code 
+      inputs:
+        targetType: 'inline' 
+        workingDirectory: $(Build.SourcesDirectory)/$(projectName)
+        script: |
+            chmod u+rwx --recursive mvn*
+            chmod go-rwx --recursive mvn*
+            DIR="./<js-folder>"
+            if [ -d "$DIR" ]; then
+              chmod u+rwx  build_frontend.bat
+              chmod go-rwx build_frontend.bat
+              echo ls > ../build_frontend.bat
+              cd <js-folder>/
+              npm ci
+              npm run-script build
+              cd ..
+
+              if [[ "$(Build.SourceBranchName)" == "dev" ]]; then 
+                 ./mvnw install -Dmaven.test.skip=true  sonar:sonar
+              else
+                 ./mvnw install -DskipTests 
+                 ls -lah $(Build.SourcesDirectory)/$(projectName)/target/
+              fi
+
+              sed 's/WAR_NAME/$(projectName)/g' ../devops/devops/Dockerfile.azuremaven  > Dockerfile
+              if [[ "$(projectName)" == "<php>" ]]; then 
+                 echo "project name is $(projectName)"
+              fi 
+
+            elif [[ "$(projectName)" == "<php2>" ]]; 
+            then
+              cp -rfp ../devops/devops/Dockerfile.php2  $(Build.SourcesDirectory)/$(projectName)/Dockerfile
+
+            elif [[ "$(projectName)" == "<php3>" ]]; 
+            then
+              cp -rfp ../devops/devops/Dockerfile.php3  $(Build.SourcesDirectory)/$(projectName)/Dockerfile
+            
+               
+            else
+
+              if [[ "$(Build.SourceBranchName)" == "dev" ]]; then 
+                 ./mvnw install -Dmaven.test.skip=true sonar:sonar
+              else
+                 ./mvnw install -DskipTests 
+              fi    
+              sed 's/WAR_NAME/$(projectName)/g' ../devops/devops/Dockerfile.azuremaven  > Dockerfile
+              ls -lah ./target/
+
+              
+            fi        
+
+    # run sonarqube analyze if project name is <php3>
+    - task: SonarQubeAnalyze@4
+      condition: and(succeeded(),  eq(variables.projectName, '<php3>'))
+
+    - task: SonarQubePublish@4
+      inputs:
+        pollingTimeoutSec: '300'    
+ 
+    - task: Docker@2
+      condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'dev', 'live', 'master'))
+      displayName: Login to ACR
+      inputs:
+        command: login
+        containerRegistry: ${{ parameters.containerRegistryServiceConnection }}
+
+    - task: Docker@2
+      condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'dev', 'live', 'master' ))   
+      displayName: Build and Push
+      inputs:
+        command: buildAndPush
+        dockerfile: $(Build.SourcesDirectory)/$(projectName)/Dockerfile
+        repository: $(projectName)
+        tags: |
+          $(Build.SourceBranchName)-$(projectVersion)
+
+    - task: PublishPipelineArtifact@1
+      condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'dev', 'live', 'master'))
+      inputs:
+        artifactName: 'manifests'
+        path: '$(Build.SourcesDirectory)/devops/'
+
+
+- stage: Deploy
+  condition: and(succeeded(), in(variables['Build.SourceBranchName'], 'dev', 'live', 'master'))
+  displayName: Deploy stage
+  dependsOn: BuildandPush
+  variables: 
+    projectVersion:  $[ stageDependencies.BuildandPush.Maven_Build_Push.outputs['setprojectVersion.projectVersionGlobal'] ]
+    projectName:     $[ stageDependencies.BuildandPush.Maven_Build_Push.outputs['setprojectName.projectNameGlobal'] ]
+    k8sNamespace:    $(Build.SourceBranchName)
+    
+  jobs:
+  - deployment: Deploy
+    displayName: Deploy job for AKS deployment 
+    environment: ${{ parameters.aksServiceName }}
+    pool:
+      name: ${{ parameters.agent }}
+    strategy:
+      runOnce:
+        deploy:
+          steps:
+
+          - task: DownloadPipelineArtifact@2
+            inputs:
+              artifactName: 'manifests'
+              downloadPath: '$(System.ArtifactsDirectory)/manifests'
+
+          - task: Bash@3
+            name:  setHelmEnvVAR
+            inputs:
+              targetType: 'inline'
+              displayName: Set Environment variables for Deployment
+              script: |
+                if [[ "$(projectName)" == "<php3>" ]]; then
+                  echo "##vso[task.setvariable variable=volumeEnabled]false"
+                  echo "##vso[task.setvariable variable=secretProviderClassEnabled]false"
+                else 
+                  echo "##vso[task.setvariable variable=volumeEnabled]true"
+                  echo "##vso[task.setvariable variable=secretProviderClassEnabled]true"
+                fi
+
+                if [[ "$(projectName)" == "ui1" || "$(projectName)" == "ui2" || "$(projectName)" == "ui3" ]]; then
+                  echo "##vso[task.setvariable variable=ingressEnabled]true"
+                else 
+                  echo "##vso[task.setvariable variable=ingressEnabled]false"
+                fi
+      
+          - task: Bash@3
+            name:  echoVariables
+            inputs:
+              targetType: 'inline' 
+              script: |
+                echo projectVersion is $(projectVersion) 
+                echo volumeEnabled is $(volumeEnabled) 
+                echo secretProviderClassEnabled is $(secretProviderClassEnabled) 
+                echo projectName is $(projectName) 
+                echo k8sNamespace is $(k8sNamespace)
+                echo Build.SourceBranchName is  $(Build.SourceBranchName)
+                echo ingressEnabled is  $(ingressEnabled)
+                echo aksServiceName is ${{ parameters.aksServiceName }}
+                ls -lah $(System.ArtifactsDirectory)/manifests/charts/<projectname>
+
+          - task: HelmInstaller@1
+            displayName: Helm installer
+            inputs: 
+              helmVersionToInstall: 3.6.3                    
+          
+
+          - task: HelmDeploy@0
+            displayName: Helm upgrade
+            inputs:
+              command: upgrade  
+              chartType: filepath
+              chartPath: $(System.ArtifactsDirectory)/manifests/charts/<projectname>
+              releaseName: $(projectName) 
+              arguments: "--debug --timeout 20m0s --namespace $(k8sNamespace) "
+              force: false
+              install: true
+              waitForExecution: true
+              overrideValues:  |            
+                metadata.namespace="$(k8sNamespace)"
+                image.tag="$(k8sNamespace)-$(projectVersion)"
+                image.registry=${{ parameters.containerRegistry}}
+                image.repository="$(projectName)"
+                ingress.hosts[0].host=$(k8sNamespace)-$(projectName)-${{ parameters.aksregion }}.${{ parameters.clusterDns  }}
+                ingress.hosts[0].paths[0].path=/
+                ingress.hosts[0].paths[0].pathType=Prefix
+                ingress.enabled="$(ingressEnabled)"
+                volume.enabled=$(volumeEnabled)
+                volume.volumes[0].name=config
+                volume.volumes[0].emptyDir.medium=Memory
+                volume.volumes[1].name=secrets-store-inline
+                volume.volumes[1].csi.volumeAttributes.secretProviderClass="$(projectName)"
+                volume.volumes[1].csi.driver=secrets-store.csi.k8s.io
+                volume.volumes[1].csi.readOnly=true
+                SecretProviderClass.enabled=$(secretProviderClassEnabled)
+                SecretProviderClass.secret.objects.objectName="$(projectName)"
+                SecretProviderClass.parameters.keyvaultName=${{ parameters.keyvaultName }}
+                SecretProviderClass.parameters.userAssignedIdentityID=${{ parameters.userAssignedIdentityID }}
+                SecretProviderClass.parameters.tenantId=${{ parameters.tenantId }}
+                envvariables.enabled=false
+                envvariables.javaEnv[0].name=key1
+                envvariables.javaEnv[0].value=value1
+                envvariables.javaEnv[1].name=key2
+                envvariables.javaEnv[1].value=value2
+
+
+
+                
