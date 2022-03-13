@@ -291,7 +291,7 @@ stages:
             inputs: 
               helmVersionToInstall: 3.6.3                    
           
-
+# Use following repository as an helm chart https://github.com/kaganmersin/helm-aks
           - task: HelmDeploy@0
             displayName: Helm upgrade
             inputs:
